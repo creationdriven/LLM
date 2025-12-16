@@ -246,6 +246,149 @@ examples/
 
 ## 🔥 Advanced Features
 
+### Fine-tuning
+
+Each kit supports fine-tuning for specific tasks. Here are examples for each model type:
+
+#### GPT - Instruction Fine-tuning
+
+Fine-tune GPT models on instruction-following tasks:
+
+```python
+from gpt_kit import (
+    GPTModel, create_model_config, InstructionDataset,
+    create_instruction_collate_fn, AMPTrainer, save_model
+)
+import tiktoken
+
+# Load pretrained model (or create new)
+config = create_model_config("gpt2-small (124M)")
+model = GPTModel(config)
+
+# Prepare instruction data
+instruction_data = [
+    {"instruction": "Translate to French", "input": "Hello", "output": "Bonjour"},
+    {"instruction": "Summarize", "input": "Long text...", "output": "Summary..."},
+]
+
+# Create dataset
+tokenizer = tiktoken.get_encoding("gpt2")
+dataset = InstructionDataset(
+    instruction_data,
+    tokenizer,
+    format_instruction_fn=lambda x: f"### Instruction:\n{x['instruction']}\n\n### Input:\n{x['input']}"
+)
+
+# Create dataloader
+collate_fn = create_instruction_collate_fn(pad_token_id=50256, max_length=512)
+from torch.utils.data import DataLoader
+train_loader = DataLoader(dataset, batch_size=4, collate_fn=collate_fn)
+
+# Fine-tune
+optimizer = torch.optim.AdamW(model.parameters(), lr=5e-5)
+trainer = AMPTrainer(dtype='float16')
+
+for epoch in range(3):
+    for input_batch, target_batch in train_loader:
+        loss = trainer.train_step(
+            input_batch, target_batch, model, optimizer, "cuda"
+        )
+```
+
+#### BERT/RoBERTa/DistilBERT - Classification Fine-tuning
+
+Fine-tune BERT-family models for classification tasks:
+
+```python
+from bert_kit import (
+    BERTForSequenceClassification, create_model_config,
+    create_classification_dataloader, get_tokenizer,
+    AMPTrainer, evaluate_classification_metrics
+)
+
+# Load pretrained model
+config = create_model_config("bert-base-uncased (110M)")
+model = BERTForSequenceClassification(config, num_labels=3)  # 3 classes
+
+# Prepare your task-specific data
+texts = ["Text 1", "Text 2", "Text 3"]
+labels = [0, 1, 2]  # Your class labels
+
+# Create dataloader
+tokenizer = get_tokenizer("bert-base-uncased")
+train_loader = create_classification_dataloader(
+    texts=texts, labels=labels, tokenizer=tokenizer, batch_size=8
+)
+
+# Fine-tune with lower learning rate (typical for fine-tuning)
+optimizer = torch.optim.AdamW(model.parameters(), lr=2e-5)  # Lower LR for fine-tuning
+trainer = AMPTrainer(dtype='float16')
+
+for epoch in range(3):
+    model.train()
+    for batch in train_loader:
+        loss = trainer.train_classification_step(
+            batch["input_ids"], batch["attention_mask"],
+            batch["labels"], model, optimizer, "cuda"
+        )
+    
+    # Evaluate
+    metrics = evaluate_classification_metrics(model, val_loader, "cuda", num_classes=3)
+    print(f"Epoch {epoch+1} - Accuracy: {metrics['accuracy']:.4f}")
+```
+
+**Fine-tuning Tips:**
+- Use lower learning rates (1e-5 to 5e-5) compared to pretraining
+- Freeze early layers for faster training: `model.bert.encoder.layer[:6].requires_grad_(False)`
+- Use smaller batch sizes if memory is limited
+- Monitor validation metrics to avoid overfitting
+
+#### T5 - Task-Specific Fine-tuning
+
+Fine-tune T5 models for specific text-to-text tasks:
+
+```python
+from t5_kit import (
+    T5ForConditionalGeneration, create_model_config,
+    create_t5_dataloader, get_tokenizer, AMPTrainer
+)
+
+# Load pretrained model
+config = create_model_config("t5-small (60M)")
+model = T5ForConditionalGeneration(config)
+
+# Prepare task-specific data
+# Example: Translation task
+inputs = ["translate English to French: Hello", "translate English to French: Goodbye"]
+targets = ["Bonjour", "Au revoir"]
+
+# Create dataloader
+tokenizer = get_tokenizer("t5-small")
+train_loader = create_t5_dataloader(
+    inputs=inputs, targets=targets, tokenizer=tokenizer, batch_size=4
+)
+
+# Fine-tune
+optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+trainer = AMPTrainer(dtype='float16')
+
+for epoch in range(3):
+    for batch in train_loader:
+        loss = trainer.train_step(
+            batch["input_ids"],
+            batch["decoder_input_ids"],
+            batch["labels"],
+            model,
+            optimizer,
+            "cuda"
+        )
+```
+
+**T5 Fine-tuning Tips:**
+- Use task prefixes (e.g., "translate:", "summarize:", "classify:")
+- T5 works well with small datasets due to its text-to-text framework
+- Monitor BLEU/ROUGE scores for generation tasks
+
 ### Mixed Precision Training
 
 Both kits support automatic mixed precision (AMP) training for faster training and reduced memory usage.
@@ -324,6 +467,176 @@ model = wrap_model_for_distributed(model, device_ids=[0, 1])
 ```
 
 See `examples/distributed_training.py` for a complete example.
+
+### Saving and Loading Models
+
+All kits use unified checkpoint utilities for saving and loading models. Checkpoints include model weights, configuration, and optional training state.
+
+#### Saving Models
+
+Save models with optional optimizer state and metadata:
+
+```python
+from gpt_kit import GPTModel, create_model_config, save_model
+from bert_kit import BERTForSequenceClassification, create_model_config, save_model
+from t5_kit import T5ForConditionalGeneration, create_model_config, save_model
+
+# Basic save (model + config)
+config = create_model_config("gpt2-small (124M)")
+model = GPTModel(config)
+save_model(model, "checkpoint.pt", config)
+
+# Save with optimizer state (for resuming training)
+optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+save_model(
+    model, "checkpoint.pt", config,
+    optimizer=optimizer,
+    epoch=10,
+    loss=0.5,
+    best_val_loss=0.45  # Custom metadata
+)
+
+# BERT example
+bert_config = create_model_config("bert-base-uncased (110M)")
+bert_model = BERTForSequenceClassification(bert_config, num_labels=2)
+save_model(bert_model, "bert_classifier.pt", bert_config, epoch=5)
+
+# T5 example
+t5_config = create_model_config("t5-small (60M)")
+t5_model = T5ForConditionalGeneration(t5_config)
+save_model(t5_model, "t5_model.pt", t5_config, epoch=3)
+```
+
+**What Gets Saved:**
+- Model state dict (all weights)
+- Model configuration
+- Optimizer state (if provided)
+- Epoch number (if provided)
+- Loss value (if provided)
+- Any additional metadata (via `**kwargs`)
+
+#### Loading Models
+
+Load models for inference or to resume training:
+
+**Basic Loading (Inference):**
+```python
+from gpt_kit import GPTModel, load_model
+from bert_kit import BERTForSequenceClassification, load_model
+from t5_kit import T5ForConditionalGeneration, load_model
+
+# Load GPT model
+model, config, _ = load_model("checkpoint.pt", GPTModel, device="cuda")
+model.eval()  # Set to evaluation mode
+
+# Load BERT model
+model, config, _ = load_model("bert_classifier.pt", BERTForSequenceClassification, device="cuda")
+model.eval()
+
+# Load T5 model
+model, config, _ = load_model("t5_model.pt", T5ForConditionalGeneration, device="cuda")
+model.eval()
+```
+
+**Loading with Optimizer (Resume Training):**
+```python
+from gpt_kit import GPTModel, load_model
+import torch
+
+# Load model and optimizer
+model, config, optimizer = load_model(
+    "checkpoint.pt",
+    GPTModel,
+    device="cuda",
+    return_optimizer=True,
+    optimizer_class=torch.optim.AdamW,
+    lr=3e-4  # Must match original optimizer settings
+)
+
+# Resume training
+model.train()
+for epoch in range(loaded_epoch, total_epochs):
+    # ... training loop ...
+    pass
+```
+
+**Accessing Checkpoint Metadata:**
+```python
+import torch
+
+# Load checkpoint directly to access metadata
+checkpoint = torch.load("checkpoint.pt", map_location="cpu")
+print(f"Epoch: {checkpoint.get('epoch', 'N/A')}")
+print(f"Loss: {checkpoint.get('loss', 'N/A')}")
+print(f"Version: {checkpoint.get('version', 'N/A')}")
+print(f"Config: {checkpoint['config']}")
+```
+
+#### Best Practices
+
+**Saving:**
+- Save checkpoints regularly during training (e.g., every epoch)
+- Include optimizer state when you might resume training
+- Use descriptive filenames: `model_epoch_10_val_loss_0.45.pt`
+- Save best model separately: `best_model.pt`
+- Include epoch and loss for tracking progress
+
+**Loading:**
+- Always specify the correct model class when loading
+- Set `device` parameter to match your hardware
+- Use `model.eval()` for inference, `model.train()` for training
+- Verify config matches your expectations after loading
+- Check checkpoint version if migrating from older versions
+
+**Example: Complete Training Loop with Checkpointing:**
+```python
+from gpt_kit import GPTModel, create_model_config, save_model, load_model
+import torch
+
+config = create_model_config("gpt2-small (124M)")
+model = GPTModel(config).to("cuda")
+optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+
+best_loss = float('inf')
+checkpoint_dir = "checkpoints/"
+
+for epoch in range(10):
+    # Training...
+    epoch_loss = train_one_epoch(model, optimizer, train_loader)
+    
+    # Save regular checkpoint
+    save_model(
+        model, f"{checkpoint_dir}checkpoint_epoch_{epoch}.pt", config,
+        optimizer=optimizer, epoch=epoch, loss=epoch_loss
+    )
+    
+    # Save best model
+    if epoch_loss < best_loss:
+        best_loss = epoch_loss
+        save_model(
+            model, f"{checkpoint_dir}best_model.pt", config,
+            optimizer=optimizer, epoch=epoch, loss=epoch_loss,
+            best_val_loss=best_loss
+        )
+
+# Resume from checkpoint
+model, config, optimizer = load_model(
+    f"{checkpoint_dir}checkpoint_epoch_5.pt",
+    GPTModel,
+    device="cuda",
+    return_optimizer=True,
+    optimizer_class=torch.optim.AdamW,
+    lr=3e-4
+)
+```
+
+**Checkpoint Versioning:**
+- All checkpoints include version information
+- Automatic migration from older versions (0.9 → 1.0)
+- Use `get_checkpoint_version(path)` to check version
+- Use `validate_checkpoint(path)` to verify checkpoint integrity
+
+See `examples/load_checkpoint.py` for more detailed examples.
 
 ### T5 Evaluation Metrics
 
