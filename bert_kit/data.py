@@ -55,48 +55,76 @@ class MLMDataset(Dataset):
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         """
-        Get a single example with masked tokens.
+        Get a single example with masked tokens for MLM training.
+        
+        This method implements BERT's masking strategy:
+        1. Tokenize the text
+        2. Add [CLS] and [SEP] tokens
+        3. Randomly mask 15% of tokens (excluding special tokens)
+        4. For masked tokens: 80% → [MASK], 10% → random, 10% → unchanged
+        5. Create labels: original token IDs for masked positions, -100 for others
+        
+        The -100 in labels tells the loss function to ignore those positions
+        (only compute loss for masked tokens).
         
         Returns:
             Dictionary with:
-                - input_ids: Token IDs with some tokens masked
+                - input_ids: Token IDs with some tokens masked/replaced
                 - labels: Original token IDs (-100 for non-masked tokens)
-                - attention_mask: Attention mask
+                - attention_mask: Attention mask (1 for real tokens, 0 for padding)
         """
         text = self.texts[idx]
+        # Convert text to token IDs using the tokenizer
         token_ids = self.tokenizer(text)
         
-        # Truncate if necessary
+        # Truncate if sequence is too long
+        # Reserve 2 positions for [CLS] and [SEP] tokens
         if len(token_ids) > self.max_length - 2:  # -2 for [CLS] and [SEP]
             token_ids = token_ids[:self.max_length - 2]
         
-        # Add [CLS] and [SEP] tokens
+        # Add special tokens: [CLS] at start, [SEP] at end
+        # [CLS] is used for classification tasks
+        # [SEP] marks the end of the sequence
         token_ids = [CLS_TOKEN_ID] + token_ids + [SEP_TOKEN_ID]
         
-        # Create labels (will be -100 for non-masked tokens)
+        # Initialize labels with -100 (ignore_index)
+        # Only masked positions will have actual token IDs
+        # This tells the loss function to ignore non-masked tokens
         labels = [-100] * len(token_ids)
         
-        # Mask tokens
+        # Create a copy for masking (we'll modify this)
         masked_token_ids = token_ids.copy()
+        
+        # Mask tokens (skip [CLS] at position 0 and [SEP] at last position)
         for i in range(1, len(token_ids) - 1):  # Don't mask [CLS] or [SEP]
+            # Randomly decide if this token should be masked (15% probability)
             if random.random() < self.mask_probability:
-                labels[i] = token_ids[i]  # Store original token ID
+                # Store the original token ID in labels
+                # This is what the model should predict
+                labels[i] = token_ids[i]
                 
-                # 80% of the time, replace with [MASK]
-                # 10% of the time, replace with random token
-                # 10% of the time, keep original
+                # BERT's masking strategy (prevents overfitting to [MASK] token):
+                # - 80%: Replace with [MASK] token (model learns to predict from context)
+                # - 10%: Replace with random token (model learns robustness)
+                # - 10%: Keep original (model learns to use context, not just [MASK])
                 rand = random.random()
                 if rand < 0.8:
+                    # Most common: replace with [MASK]
                     masked_token_ids[i] = MASK_TOKEN_ID
                 elif rand < 0.9:
-                    masked_token_ids[i] = random.randint(0, self.vocab_size - 1)  # Random token
+                    # Sometimes: replace with random token
+                    masked_token_ids[i] = random.randint(0, self.vocab_size - 1)
+                # else: keep original (10% of masked tokens)
         
-        # Pad to max_length
+        # Create attention mask (1 for real tokens, 0 for padding)
         attention_mask = [1] * len(masked_token_ids)
+        
+        # Pad sequences to max_length for batching
+        # All sequences in a batch must have the same length
         while len(masked_token_ids) < self.max_length:
-            masked_token_ids.append(PAD_TOKEN_ID)
-            labels.append(-100)
-            attention_mask.append(0)
+            masked_token_ids.append(PAD_TOKEN_ID)  # Add padding token
+            labels.append(-100)  # Padding positions are ignored in loss
+            attention_mask.append(0)  # Don't attend to padding
         
         return {
             "input_ids": torch.tensor(masked_token_ids, dtype=torch.long),

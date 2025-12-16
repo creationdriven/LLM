@@ -24,30 +24,57 @@ def compute_mlm_loss(
     ignore_index: int = IGNORE_INDEX
 ) -> torch.Tensor:
     """
-    Calculate Masked Language Modeling (MLM) loss.
+    Calculate Masked Language Modeling (MLM) loss for BERT pretraining.
+    
+    MLM loss is computed only for masked token positions. Non-masked tokens
+    have label -100 (ignore_index) and don't contribute to the loss.
+    
+    Key differences from GPT loss:
+    - GPT: Predicts next token at every position
+    - BERT: Only predicts masked tokens (15% of positions)
+    - GPT: Uses causal (unidirectional) context
+    - BERT: Uses bidirectional context (can see both sides)
+    
+    Example:
+        Input:  [The, [MASK], sat, on, the, mat]
+        Labels: [-100, cat, -100, -100, -100, -100]
+        Loss:   Only computed for position 1 (the masked "cat")
     
     Args:
         input_ids: Input token IDs of shape (batch_size, seq_len)
+                  Contains [MASK] tokens at masked positions
         labels: Label token IDs of shape (batch_size, seq_len)
-                (-100 for non-masked tokens)
+                - Actual token ID at masked positions
+                - ignore_index (-100) at non-masked positions
+                This tells the loss function which positions to compute loss for
         model: BERTForMaskedLM model instance
-        device: Device to run computation on
-        ignore_index: Index to ignore in loss calculation
+              Returns logits of shape (batch_size, seq_len, vocab_size)
+        device: Device to run computation on ("cuda" or "cpu")
+        ignore_index: Index to ignore in loss calculation (default: -100)
+                     Positions with this value don't contribute to loss
         
     Returns:
-        Scalar loss tensor
+        Scalar loss tensor (average loss over all masked tokens)
     """
+    # Move tensors to the specified device
     input_ids = input_ids.to(device)
     labels = labels.to(device)
     
+    # Forward pass: model predicts logits for each position
+    # Shape: (batch_size, seq_len, vocab_size)
+    # Even though we only care about masked positions, model computes all positions
     logits = model(input_ids)
     
-    # Reshape for cross entropy: (batch * seq_len, vocab_size) and (batch * seq_len,)
+    # Reshape for cross-entropy loss:
+    # - Flatten batch and sequence dimensions: (batch*seq_len, vocab_size)
+    # - Flatten labels: (batch*seq_len,)
+    # Cross-entropy will automatically ignore positions with ignore_index
     loss = F.cross_entropy(
-        logits.view(-1, logits.size(-1)),
-        labels.view(-1),
-        ignore_index=ignore_index
+        logits.view(-1, logits.size(-1)),  # (batch*seq_len, vocab_size)
+        labels.view(-1),  # (batch*seq_len,)
+        ignore_index=ignore_index  # Ignore non-masked positions (-100)
     )
+    
     return loss
 
 

@@ -16,13 +16,36 @@ from .config import PAD_TOKEN_ID, IGNORE_INDEX
 
 class GPTPretrainingDataset(Dataset):
     """
-    Dataset for GPT pretraining with sliding window approach.
+    Dataset for GPT pretraining using sliding window approach.
+    
+    This dataset creates training examples by sliding a window over the input text.
+    Each example consists of a sequence of tokens, and the target is the same
+    sequence shifted by one position (next-token prediction).
+    
+    Sliding Window Strategy:
+    - Window size: max_length
+    - Stride: How much to move the window (default: max_length for no overlap)
+    - Overlap: stride < max_length creates overlapping windows
+    
+    Example:
+        Text: "The cat sat on the mat"
+        max_length=5, stride=3
+        
+        Window 1: "The cat sat on the" → Target: "cat sat on the mat"
+        Window 2: "sat on the mat"     → Target: "on the mat [EOS]"
+        (with stride=3, windows overlap)
+    
+    This approach allows the model to see different contexts and learn to
+    predict tokens in various positions, improving generalization.
     
     Args:
         text: Raw text string to tokenize
-        tokenizer: Tiktoken tokenizer instance
-        max_length: Maximum sequence length
-        stride: Stride for sliding window (overlap between sequences)
+        tokenizer: Tiktoken tokenizer instance (GPT-2 tokenizer)
+        max_length: Maximum sequence length (context window size)
+        stride: Stride for sliding window
+                - max_length: No overlap (non-overlapping windows)
+                - < max_length: Overlapping windows (more training data)
+                - Smaller stride = more examples but more overlap
     """
     def __init__(
         self, 
@@ -34,12 +57,23 @@ class GPTPretrainingDataset(Dataset):
         self.input_ids: List[torch.Tensor] = []
         self.target_ids: List[torch.Tensor] = []
 
+        # Tokenize the input text into token IDs
+        # allowed_special allows the end-of-text token to be included
         token_ids = tokenizer.encode(text, allowed_special={"<|endoftext|>"})
 
         # Create sliding window sequences
+        # Slide window from start to end of token sequence
+        # Stop when remaining tokens < max_length (can't form full window)
         for i in range(0, len(token_ids) - max_length, stride):
+            # Input chunk: tokens from position i to i+max_length
             input_chunk = token_ids[i:i + max_length]
+            
+            # Target chunk: same sequence shifted by 1 position
+            # This creates next-token prediction targets
+            # Position j in target corresponds to position j+1 in input
             target_chunk = token_ids[i + 1: i + max_length + 1]
+            
+            # Convert to tensors for efficient batching
             self.input_ids.append(torch.tensor(input_chunk, dtype=torch.long))
             self.target_ids.append(torch.tensor(target_chunk, dtype=torch.long))
 

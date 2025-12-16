@@ -24,27 +24,55 @@ def compute_batch_loss(
     ignore_index: int = IGNORE_INDEX
 ) -> torch.Tensor:
     """
-    Calculate loss for a single batch.
+    Calculate cross-entropy loss for a single batch in GPT training.
+    
+    This function implements the standard next-token prediction loss used in
+    GPT training. The model predicts the next token at each position, and we
+    compute the cross-entropy loss between predictions and actual next tokens.
+    
+    Key points:
+    - Input and target are shifted by 1 position (teacher forcing)
+    - Loss is computed for all positions simultaneously
+    - Padding tokens are ignored using ignore_index
+    
+    Example:
+        Input:  [The, cat, sat]
+        Target: [cat, sat, on]  (shifted by 1)
+        Model predicts "cat" given "The", "sat" given "cat", etc.
     
     Args:
         input_batch: Input token IDs of shape (batch_size, seq_len)
+                    These are the tokens the model sees
         target_batch: Target token IDs of shape (batch_size, seq_len)
+                     These are the tokens the model should predict
+                     (typically input_batch shifted by 1 position)
         model: GPT model instance
-        device: Device to run computation on
-        ignore_index: Index to ignore in loss calculation
+        device: Device to run computation on ("cuda" or "cpu")
+        ignore_index: Index to ignore in loss calculation (for padding tokens)
+                    Tokens with this index won't contribute to loss
         
     Returns:
-        Scalar loss tensor
+        Scalar loss tensor (average loss over all non-ignored tokens)
     """
+    # Move tensors to the specified device (GPU or CPU)
     input_batch = input_batch.to(device)
     target_batch = target_batch.to(device)
     
+    # Forward pass: model predicts logits for next token at each position
+    # Shape: (batch_size, seq_len, vocab_size)
+    # Each position has a probability distribution over the vocabulary
     logits = model(input_batch)
+    
+    # Reshape for cross-entropy loss:
+    # - Flatten batch and sequence dimensions: (batch*seq_len, vocab_size)
+    # - Flatten targets: (batch*seq_len,)
+    # This allows computing loss for all positions at once
     loss = F.cross_entropy(
-        logits.flatten(0, 1), 
-        target_batch.flatten(),
-        ignore_index=ignore_index
+        logits.flatten(0, 1),  # (batch*seq_len, vocab_size)
+        target_batch.flatten(),  # (batch*seq_len,)
+        ignore_index=ignore_index  # Ignore padding tokens
     )
+    
     return loss
 
 

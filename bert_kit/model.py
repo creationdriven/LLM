@@ -102,7 +102,24 @@ class FeedForward(nn.Module):
 
 class MultiHeadAttention(nn.Module):
     """
-    Multi-head attention mechanism (bidirectional, no causal mask).
+    Multi-head bidirectional self-attention mechanism for BERT.
+    
+    Unlike GPT's causal attention, BERT uses bidirectional attention where each
+    token can attend to ALL other tokens in the sequence (both past and future).
+    This allows BERT to understand the full context of each word.
+    
+    Architecture:
+    1. Project input to Q (query), K (key), V (value) vectors
+    2. Split into multiple heads for parallel attention computation
+    3. Compute attention scores: Q @ K^T / sqrt(head_dim)
+    4. NO causal mask - all tokens can attend to all tokens
+    5. Apply softmax to get attention weights
+    6. Weighted sum of values using attention weights
+    7. Concatenate heads and project to output dimension
+    
+    This bidirectional attention is what makes BERT powerful for understanding
+    tasks like classification and question answering, where context from both
+    directions is important.
     
     Args:
         config: Model configuration dictionary
@@ -275,35 +292,79 @@ class BERTModel(nn.Module):
         """
         Forward pass through BERT model.
         
+        This method implements the complete BERT forward pass:
+        1. Convert token IDs to embeddings
+        2. Add segment (token type) embeddings (for sentence pairs)
+        3. Add positional embeddings (learned)
+        4. Sum all embeddings and apply layer norm + dropout
+        5. Pass through N encoder blocks (each with bidirectional attention)
+        6. Return contextualized hidden states
+        
+        Unlike GPT, BERT uses bidirectional attention, so each token can attend
+        to all other tokens in the sequence (both past and future). This makes
+        BERT powerful for understanding tasks but unsuitable for generation.
+        
         Args:
             input_ids: Token IDs of shape (batch_size, seq_len)
-            attention_mask: Optional attention mask of shape (batch_size, seq_len)
+                     Each value is an integer index into the vocabulary
+            attention_mask: Optional mask of shape (batch_size, seq_len)
+                          where 1 = attend, 0 = mask out (for padding)
+                          If None, all tokens are attended to
             token_type_ids: Optional segment IDs of shape (batch_size, seq_len)
+                          Used to distinguish sentence A (0) from sentence B (1)
+                          If None, assumes single sentence (all zeros)
             
         Returns:
             Hidden states of shape (batch_size, seq_len, hidden_size)
+            Each token now has a contextualized representation that includes
+            information from all other tokens in the sequence
         """
         batch_size, seq_len = input_ids.shape
         
-        # Get embeddings
+        # Step 1: Convert token IDs to dense embeddings
+        # Shape: (batch_size, seq_len) → (batch_size, seq_len, hidden_size)
+        # Each token ID is mapped to a learned embedding vector
         word_embeddings = self.word_embeddings(input_ids)
+        
+        # Step 2: Create position IDs and get positional embeddings
+        # BERT uses learned positional embeddings (not sinusoidal)
+        # Generate position IDs: [0, 1, 2, ..., seq_len-1] for each sequence
         position_ids = torch.arange(seq_len, device=input_ids.device).unsqueeze(0).expand(batch_size, -1)
+        # Shape: (batch_size, seq_len) → (batch_size, seq_len, hidden_size)
         position_embeddings = self.position_embeddings(position_ids)
         
+        # Step 3: Get segment (token type) embeddings
+        # Used to distinguish sentence A from sentence B in NSP task
+        # If not provided, assume single sentence (all zeros)
         if token_type_ids is None:
             token_type_ids = torch.zeros_like(input_ids)
+        # Shape: (batch_size, seq_len) → (batch_size, seq_len, hidden_size)
         token_type_embeddings = self.token_type_embeddings(token_type_ids)
         
-        # Combine embeddings
+        # Step 4: Combine all three embeddings
+        # Sum them element-wise (broadcasting handles dimensions)
+        # Shape: (batch_size, seq_len, hidden_size)
         embeddings = word_embeddings + position_embeddings + token_type_embeddings
+        
+        # Step 5: Apply layer normalization and dropout
+        # Layer norm stabilizes training (BERT uses eps=1e-12)
         embeddings = self.layer_norm(embeddings)
+        # Dropout provides regularization
         embeddings = self.dropout(embeddings)
         
-        # Pass through encoder layers
+        # Step 6: Pass through transformer encoder blocks
+        # Each block applies bidirectional attention and feed-forward network
+        # The attention_mask (if provided) masks out padding tokens
+        # Unlike GPT, there's NO causal mask - all tokens can attend to all tokens
         hidden_states = embeddings
         for encoder_layer in self.encoder_layers:
+            # Each layer refines the representations using bidirectional context
+            # Token at position i can see tokens at all positions (0 to seq_len-1)
             hidden_states = encoder_layer(hidden_states, attention_mask)
         
+        # Return contextualized hidden states
+        # Each token's representation now includes information from the entire sequence
+        # This bidirectional context makes BERT powerful for understanding tasks
         return hidden_states
 
 
